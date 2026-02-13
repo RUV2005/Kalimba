@@ -1,0 +1,27 @@
+package com.danmo.kalimba
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
+import com.danmo.kalimba.main.KalimbaScreen
+import com.danmo.kalimba.ui.theme.KalimbaAppTheme
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            KalimbaAppTheme {
+                Surface(
+                    modifier = Modifier.Companion.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    KalimbaScreen()
+                }
+            }
+        }
+    }
+}
