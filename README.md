@@ -58,7 +58,7 @@
 ### 安装步骤
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/your-username/harmony-kalimba.git
+   git clone https://github.com/ruv2005/Kalimba.git
    ```
 2. 在 Android Studio 中打开项目。
 3. 修改 `data/remote/AuthApiService.kt` 中的 `baseUrl` 为你的后端 API 地址。
