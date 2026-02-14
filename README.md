@@ -42,12 +42,17 @@
 - **图片加载:** Coil
 - **架构模式:** MVVM (Model-View-ViewModel)
 
-## 📸 界面预览
+### 📸 界面预览
 
-|                  自由探索                   |               简谱编辑               |              练习模式              |
-|:---------------------------------------:|:--------------------------------:|:------------------------------:|
-| _![主界面](./screenshots/main_screen.png)_ | _![简谱编辑](./screenshots/nmn.png)_ | _![练习模式](screenshots/practice.png)_ |
+#### 核心演奏与编辑
+| 自由探索 | 简谱编辑 | 练习模式 |
+| :---: | :---: | :---: |
+| ![主界面](./screenshots/main_screen.png) | ![简谱编辑](./screenshots/nmn.png) | ![练习模式](./screenshots/practice.png) |
 
+#### 云端与曲库
+| 我的云端简谱 | 简谱列表 |
+| :---: | :---: |
+| ![我的云端](./screenshots/cloud.png) | ![简谱列表](./screenshots/list.png) |
 ## 🚀 快速开始
 
 ### 编译要求
