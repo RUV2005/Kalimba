@@ -26,25 +26,46 @@ import androidx.compose.ui.unit.sp
 import com.danmo.kalimba.R
 import com.danmo.kalimba.accessibility.AccessibilityHelper
 import com.danmo.kalimba.accessibility.VibrationType
+import com.danmo.kalimba.data.local.Converters
+import com.danmo.kalimba.data.local.KalimbaDatabase
+import com.danmo.kalimba.data.local.NoteData
+import com.danmo.kalimba.data.local.SegmentData
+import com.danmo.kalimba.data.local.SheetMusicEntity
 import com.danmo.kalimba.main.KalimbaKey
 import com.danmo.kalimba.main.KalimbaKeyData
+import com.danmo.kalimba.settings.AppSettings
+import com.danmo.kalimba.settings.SettingsManager
 import com.danmo.kalimba.main.Octave as MainOctave
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NmnScreen(
-    onNavigateBack: () -> Unit = {} // ⚠️ 新增：返回回调参数
+    sheetId: Long = -1L, // -1 表示新建，其他值表示编辑现有简谱
+    onNavigateBack: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-    // ⚠️ 使用 AccessibilityHelper 替代原来的 announce
     val accessibilityHelper = remember { AccessibilityHelper(context) }
     val audioManager = remember { NmnAudioManager(context) }
+    val scope = rememberCoroutineScope()
+    val db = remember { KalimbaDatabase.getDatabase(context) }
+
+    val settingsManager = remember { SettingsManager(context) }
+
+    // 从 DataStore 读取设置
+    val settings by settingsManager.settingsFlow.collectAsState(initial = AppSettings())
+
+    // 使用持久化的设置值初始化
+    var isSpeechEnabled by remember { mutableStateOf(settings.inAppSpeechEnabled) }
+
 
     var isReady by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(sheetId != -1L) } // 编辑模式时显示加载
+    var loadError by remember { mutableStateOf<String?>(null) }
 
     var segments by remember { mutableStateOf(listOf(NmnData.createEmptySegment(1))) }
     var currentSegmentIndex by remember { mutableIntStateOf(0) }
@@ -53,28 +74,78 @@ fun NmnScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var selectedOctave by remember { mutableStateOf(MainOctave.MIDDLE) }
     var songName by remember { mutableStateOf("未命名简谱") }
+    var existingSheetId by remember { mutableStateOf<Long?>(null) } // 保存现有简谱的ID
 
     var showRenameDialog by remember { mutableStateOf(false) }
     var tempSongName by remember { mutableStateOf("") }
+
+    // 当设置变化时同步到本地状态
+    LaunchedEffect(settings.inAppSpeechEnabled) {
+        isSpeechEnabled = settings.inAppSpeechEnabled
+        accessibilityHelper.isSpeechEnabled = settings.inAppSpeechEnabled
+    }
+
+    // 从数据库加载现有简谱
+    LaunchedEffect(sheetId) {
+        if (sheetId != -1L) {
+            isLoading = true
+            try {
+                val entity = db.sheetMusicDao().getSheetById(sheetId)
+                if (entity != null) {
+                    // 加载成功，解析数据
+                    existingSheetId = entity.id
+                    songName = entity.name
+
+                    // 解析段落
+                    val converter = Converters()
+                    val segmentDataList = converter.fromSegmentList(entity.segments)
+
+                    segments = segmentDataList.map { segData ->
+                        NmnSegment(
+                            id = segData.id,
+                            name = segData.name,
+                            notes = segData.notes.map { noteData ->
+                                NmnNote(
+                                    keyId = noteData.keyId,
+                                    pitch = noteData.pitch,
+                                    octave = Octave.valueOf(noteData.octave),
+                                    isRest = noteData.isRest,
+                                    durationMs = noteData.durationMs
+                                )
+                            }
+                        )
+                    }
+
+                    // 重置位置
+                    currentSegmentIndex = 0
+                    currentNoteIndex = 0
+
+                    accessibilityHelper.speak("已加载《${entity.name}》，共${segments.size}段")
+                } else {
+                    loadError = "找不到该简谱"
+                    accessibilityHelper.speak("加载失败，找不到简谱")
+                }
+            } catch (e: Exception) {
+                loadError = "加载失败：${e.message}"
+                accessibilityHelper.speak("加载失败")
+            } finally {
+                isLoading = false
+            }
+        }
+    }
 
     val currentSegment = segments.getOrNull(currentSegmentIndex) ?: segments.first()
     val hasNotes = currentSegment.notes.isNotEmpty()
     val currentNoteExists = currentNoteIndex < currentSegment.notes.size
 
-    // ⚠️ 语音播报开关状态（提升到 NmnScreen 级别，默认开启）
-    var isSpeechEnabled by remember { mutableStateOf(true) }
-
-    // ⚠️ 同步 AccessibilityHelper 的状态
     LaunchedEffect(Unit) {
         while (!audioManager.isReady() || !accessibilityHelper.isReady()) {
             delay(100L)
         }
         isReady = true
-        // 同步初始状态到 AccessibilityHelper
         accessibilityHelper.isSpeechEnabled = isSpeechEnabled
     }
 
-    // ⚠️ 当开关状态变化时同步到 AccessibilityHelper
     LaunchedEffect(isSpeechEnabled) {
         accessibilityHelper.isSpeechEnabled = isSpeechEnabled
     }
@@ -97,10 +168,11 @@ fun NmnScreen(
         }
     }
 
+    // 保存对话框
     if (showRenameDialog) {
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
-            title = { Text("保存简谱") },
+            title = { Text(if (existingSheetId != null) "保存修改" else "保存简谱") },
             text = {
                 Column {
                     Text("请输入简谱名称：", fontSize = 14.sp, color = Color.Gray)
@@ -117,15 +189,63 @@ fun NmnScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (tempSongName.isNotBlank()) {
-                            songName = tempSongName
-                            // ⚠️ 使用 AccessibilityHelper
-                            accessibilityHelper.provideFeedback(
-                                text = "已保存为 $songName",
-                                vibrationType = VibrationType.MEDIUM
-                            )
+                        val finalName = if (tempSongName.isNotBlank()) tempSongName else songName
+                        songName = finalName
+
+                        accessibilityHelper.vibrate(VibrationType.CLICK)
+                        scope.launch {
+                            try {
+                                val entity = SheetMusicEntity(
+                                    id = existingSheetId ?: 0, // 如果是编辑，保留原ID；新建则为0（自增）
+                                    name = finalName,
+                                    createdAt = existingSheetId?.let {
+                                        db.sheetMusicDao().getSheetById(it)?.createdAt
+                                    } ?: System.currentTimeMillis(),
+                                    updatedAt = System.currentTimeMillis(),
+                                    segments = Converters().toSegmentList(
+                                        segments.map { seg ->
+                                            SegmentData(
+                                                id = seg.id,
+                                                name = seg.name,
+                                                notes = seg.notes.map { note ->
+                                                    NoteData(
+                                                        keyId = note.keyId,
+                                                        pitch = note.pitch,
+                                                        octave = note.octave.name,
+                                                        isRest = note.isRest,
+                                                        durationMs = note.durationMs
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    ),
+                                    totalNotes = segments.sumOf { it.notes.size },
+                                    totalSegments = segments.size,
+                                    bpm = 80
+                                )
+
+                                val db = KalimbaDatabase.getDatabase(context)
+                                db.sheetMusicDao().insertSheet(entity)
+
+                                accessibilityHelper.provideFeedback(
+                                    text = "已保存：$finalName",
+                                    vibrationType = VibrationType.STRONG
+                                )
+
+                                showRenameDialog = false
+                                // 保存成功后，如果原来是新建，现在有ID了，更新状态
+                                if (existingSheetId == null) {
+                                    // 重新查询获取新插入的ID（通过名称和时间戳匹配）
+                                    val savedSheet = db.sheetMusicDao().getAllSheets()
+                                        .collect { list ->
+                                            list.find { it.name == finalName && it.updatedAt == entity.updatedAt }
+                                        }
+                                    // 注意：这里简化处理，实际可能需要更好的方式获取新ID
+                                }
+                            } catch (e: Exception) {
+                                accessibilityHelper.speak("保存失败：${e.message}")
+                            }
                         }
-                        showRenameDialog = false
                     }
                 ) {
                     Text("保存")
@@ -145,46 +265,50 @@ fun NmnScreen(
         },
         topBar = {
             TopAppBar(
-                // ⚠️ 新增：返回按钮
                 navigationIcon = {
                     IconButton(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
                             onNavigateBack()
-                        },
-                        modifier = Modifier.semantics {
-                            contentDescription = "返回"
                         }
                     ) {
                         Icon(
                             painter = painterResource(id = R.drawable.ic_arrow_back),
-                            contentDescription = null
+                            contentDescription = "返回",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 },
                 title = {
                     Text(
-                        text = "简谱编辑 - $songName",
-                        // --- 核心修改部分 ---
-                        style = androidx.compose.ui.text.TextStyle(
-                            fontSize = 14.sp,                // 修改字体大小
-                        ),
+                        text = buildString {
+                            append("简谱编辑 - ")
+                            append(songName)
+                            if (existingSheetId != null) append(" (编辑)")
+                        },
+                        style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.semantics {
-                            contentDescription = "当前编辑 $songName"
+                            contentDescription = "当前编辑 $songName${if (existingSheetId != null) "，编辑模式" else ""}"
                         }
                     )
                 },
                 actions = {
-                    // ⚠️ 语音播报开关按钮（移除了内部重复定义）
+                    // 修改语音播报开关的点击处理
                     IconButton(
                         onClick = {
-                            isSpeechEnabled = !isSpeechEnabled
+                            val newEnabled = !isSpeechEnabled
+                            isSpeechEnabled = newEnabled
+                            accessibilityHelper.isSpeechEnabled = newEnabled
                             accessibilityHelper.vibrate(VibrationType.CLICK)
-                            // 使用 provideFeedback 来播报状态变化（即使关闭也能听到这次播报）
-                            if (isSpeechEnabled) {
+
+                            // 保存到 DataStore
+                            scope.launch {
+                                settingsManager.updateInAppSpeechEnabled(newEnabled)
+                            }
+
+                            if (newEnabled) {
                                 accessibilityHelper.speak("语音播报已开启", interrupt = true)
                             } else {
-                                // 关闭时也要给用户反馈，但用振动代替
                                 accessibilityHelper.vibrate(VibrationType.DOUBLE_CLICK)
                             }
                         },
@@ -201,14 +325,16 @@ fun NmnScreen(
                         )
                     }
 
-                    // 新建按钮
                     IconButton(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
+                            // 新建：重置所有状态
                             segments = listOf(NmnData.createEmptySegment(1))
                             currentSegmentIndex = 0
                             currentNoteIndex = 0
                             songName = "未命名简谱"
+                            existingSheetId = null // 清除现有ID，变为新建模式
+                            selectedOctave = MainOctave.MIDDLE
                             accessibilityHelper.speak("新建简谱")
                         },
                         enabled = isReady,
@@ -239,13 +365,11 @@ fun NmnScreen(
                                     notes = currentSegment.notes,
                                     onNote = { index ->
                                         currentNoteIndex = index
-                                        // ⚠️ 预览时添加轻微振动
                                         accessibilityHelper.vibrate(VibrationType.TICK)
                                     },
                                     onComplete = {
                                         isPreviewing = false
                                         currentNoteIndex = currentNoteIndex.coerceAtMost(currentSegment.notes.size - 1)
-                                        // ⚠️ 移除了 accessibilityHelper.speak("预览结束")
                                     },
                                     bpm = 80
                                 )
@@ -264,7 +388,6 @@ fun NmnScreen(
                         )
                     }
 
-                    // 保存按钮
                     IconButton(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
@@ -273,7 +396,7 @@ fun NmnScreen(
                         },
                         enabled = isReady && hasNotes,
                         modifier = Modifier.semantics {
-                            contentDescription = "结束编辑并保存"
+                            contentDescription = if (existingSheetId != null) "保存修改" else "保存简谱"
                         }
                     ) {
                         Icon(
@@ -286,138 +409,176 @@ fun NmnScreen(
             )
         }
     ) { padding ->
-        if (!isReady) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else {
-            Row(modifier = Modifier.fillMaxSize().padding(padding)) {
-                if (isLandscape) {
-                    OctaveSelector(selectedOctave, { selectedOctave = it }, true)
-                }
-
-                Column(
+        when {
+            isLoading -> {
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(padding),
+                    contentAlignment = Alignment.Center
                 ) {
-                    EditableNoteDisplay(
-                        songName = songName,
-                        segmentIndex = currentSegmentIndex + 1,
-                        currentNoteIndex = currentNoteIndex,
-                        totalNotes = currentSegment.notes.size,
-                        notes = currentSegment.notes,
-                        isPreviewing = isPreviewing,
-                        height = if (isLandscape) 100.dp else 220.dp,
-                        isEditingNew = !currentNoteExists && !isPreviewing
-                    )
-
-                    if (!isLandscape) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OctaveSelector(selectedOctave, { selectedOctave = it }, false)
-                        Spacer(modifier = Modifier.weight(1f))
-                    } else {
-                        Spacer(modifier = Modifier.height(8.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("加载简谱中...")
+                    }
+                }
+            }
+            loadError != null -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_error),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(loadError!!, color = MaterialTheme.colorScheme.error)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(onClick = onNavigateBack) {
+                            Text("返回")
+                        }
+                    }
+                }
+            }
+            !isReady -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+            else -> {
+                // 主编辑界面
+                Row(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    if (isLandscape) {
+                        OctaveSelector(selectedOctave, { selectedOctave = it }, true)
                     }
 
-                    val highlightedKeyId = if (currentNoteExists && !isPreviewing) {
-                        currentSegment.notes.getOrNull(currentNoteIndex)?.keyId
-                    } else null
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        EditableNoteDisplay(
+                            songName = songName,
+                            segmentIndex = currentSegmentIndex + 1,
+                            currentNoteIndex = currentNoteIndex,
+                            totalNotes = currentSegment.notes.size,
+                            notes = currentSegment.notes,
+                            isPreviewing = isPreviewing,
+                            height = if (isLandscape) 100.dp else 220.dp,
+                            isEditingNew = !currentNoteExists && !isPreviewing
+                        )
 
-                    val filteredKeys = KalimbaKeyData.getAllKeys()
-                        .filter { it.octave == selectedOctave }
-                        .sortedBy { it.index }
-
-                    FilteredKeyRow(
-                        keys = filteredKeys,
-                        keyHeight = if (isLandscape) 48.dp else 86.dp,
-                        highlightedKeyId = highlightedKeyId,
-                        accessibilityHelper = accessibilityHelper,
-                        onKeyClick = { key ->
-                            if (isPreviewing) return@FilteredKeyRow
-
-                            // ⚠️ 添加触觉反馈
-                            accessibilityHelper.vibrate(VibrationType.MEDIUM)
-
-                            audioManager.playSoundWithCallback(key.id) {}
-
-                            val newNote = NmnNote(key.id, key.pitch, Octave.valueOf(key.octave.name))
-                            val currentNotes = currentSegment.notes.toMutableList()
-
-                            if (currentNoteExists) {
-                                currentNotes[currentNoteIndex] = newNote
-                            } else {
-                                currentNotes.add(currentNoteIndex, newNote)
-                            }
-
-                            val updatedSegment = currentSegment.copy(notes = currentNotes)
-                            val newSegments = segments.toMutableList()
-                            newSegments[currentSegmentIndex] = updatedSegment
-                            segments = newSegments
-
-                            currentNoteIndex = (currentNoteIndex + 1).coerceAtMost(currentNotes.size)
-
-                            val pitchName = KeyPositionHelper.getPitchName(key.id)
-                            // ⚠️ 使用 AccessibilityHelper
-                            accessibilityHelper.speak("录入 $pitchName")
+                        if (!isLandscape) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OctaveSelector(selectedOctave, { selectedOctave = it }, false)
+                            Spacer(modifier = Modifier.weight(1f))
+                        } else {
+                            Spacer(modifier = Modifier.height(8.dp))
                         }
-                    )
 
-                    Spacer(modifier = Modifier.height(if (isLandscape) 8.dp else 12.dp))
+                        val highlightedKeyId = if (currentNoteExists && !isPreviewing) {
+                            currentSegment.notes.getOrNull(currentNoteIndex)?.keyId
+                        } else null
 
-                    // 控制区域
-                    EditorControlArea(
-                        currentSegment = currentSegment,
-                        currentSegmentIndex = currentSegmentIndex,
-                        currentNoteIndex = currentNoteIndex,
-                        totalSegments = segments.size,
-                        isPlaying = isPlaying,
-                        isPreviewing = isPreviewing,
-                        audioManager = audioManager,
-                        accessibilityHelper = accessibilityHelper,
-                        onSegmentChange = { idx ->
-                            currentSegmentIndex = idx
-                            currentNoteIndex = 0
-                        },
-                        onNoteChange = { idx -> currentNoteIndex = idx },
-                        onPlayingChanged = { isPlaying = it },
-                        onAddSegment = {
-                            val newId = segments.size + 1
-                            segments = segments + NmnData.createEmptySegment(newId)
-                            currentSegmentIndex = segments.size - 1
-                            currentNoteIndex = 0
-                            accessibilityHelper.speak("新增第${newId}段")
-                        },
-                        onDeleteSegment = {
-                            if (segments.size > 1) {
+                        val filteredKeys = KalimbaKeyData.getAllKeys()
+                            .filter { it.octave == selectedOctave }
+                            .sortedBy { it.index }
+
+                        FilteredKeyRow(
+                            keys = filteredKeys,
+                            keyHeight = if (isLandscape) 48.dp else 86.dp,
+                            highlightedKeyId = highlightedKeyId,
+                            accessibilityHelper = accessibilityHelper,
+                            onKeyClick = { key ->
+                                if (isPreviewing) return@FilteredKeyRow
+
+                                accessibilityHelper.vibrate(VibrationType.MEDIUM)
+
+                                audioManager.playSoundWithCallback(key.id) {}
+
+                                val newNote = NmnNote(key.id, key.pitch, Octave.valueOf(key.octave.name))
+                                val currentNotes = currentSegment.notes.toMutableList()
+
+                                if (currentNoteExists) {
+                                    currentNotes[currentNoteIndex] = newNote
+                                } else {
+                                    currentNotes.add(currentNoteIndex, newNote)
+                                }
+
+                                val updatedSegment = currentSegment.copy(notes = currentNotes)
                                 val newSegments = segments.toMutableList()
-                                newSegments.removeAt(currentSegmentIndex)
+                                newSegments[currentSegmentIndex] = updatedSegment
                                 segments = newSegments
-                                currentSegmentIndex = currentSegmentIndex.coerceAtMost(segments.size - 1)
-                                currentNoteIndex = 0
-                                accessibilityHelper.speak("删除段落")
-                            }
-                        },
-                        onDeleteNote = { newIndex, newNotes ->
-                            val updatedSegment = currentSegment.copy(notes = newNotes)
-                            val newSegments = segments.toMutableList()
-                            newSegments[currentSegmentIndex] = updatedSegment
-                            segments = newSegments
-                            currentNoteIndex = newIndex
-                        },
-                        onAddRest = { newNotes ->
-                            val updatedSegment = currentSegment.copy(notes = newNotes)
-                            val newSegments = segments.toMutableList()
-                            newSegments[currentSegmentIndex] = updatedSegment
-                            segments = newSegments
-                            currentNoteIndex = currentNoteIndex + 1
-                            accessibilityHelper.speak("添加停顿")
-                        },
-                        isLandscape = isLandscape
-                    )
 
-                    Spacer(modifier = Modifier.height(if (isLandscape) 4.dp else 12.dp))
+                                currentNoteIndex = (currentNoteIndex + 1).coerceAtMost(currentNotes.size)
+
+                                val pitchName = KeyPositionHelper.getPitchName(key.id)
+                                accessibilityHelper.speak("录入 $pitchName")
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(if (isLandscape) 8.dp else 12.dp))
+
+                        EditorControlArea(
+                            currentSegment = currentSegment,
+                            currentSegmentIndex = currentSegmentIndex,
+                            currentNoteIndex = currentNoteIndex,
+                            totalSegments = segments.size,
+                            isPlaying = isPlaying,
+                            isPreviewing = isPreviewing,
+                            audioManager = audioManager,
+                            accessibilityHelper = accessibilityHelper,
+                            onSegmentChange = { idx ->
+                                currentSegmentIndex = idx
+                                currentNoteIndex = 0
+                            },
+                            onNoteChange = { idx -> currentNoteIndex = idx },
+                            onPlayingChanged = { isPlaying = it },
+                            onAddSegment = {
+                                val newId = segments.size + 1
+                                segments = segments + NmnData.createEmptySegment(newId)
+                                currentSegmentIndex = segments.size - 1
+                                currentNoteIndex = 0
+                                accessibilityHelper.speak("新增第${newId}段")
+                            },
+                            onDeleteSegment = {
+                                if (segments.size > 1) {
+                                    val newSegments = segments.toMutableList()
+                                    newSegments.removeAt(currentSegmentIndex)
+                                    segments = newSegments
+                                    currentSegmentIndex = currentSegmentIndex.coerceAtMost(segments.size - 1)
+                                    currentNoteIndex = 0
+                                    accessibilityHelper.speak("删除段落")
+                                }
+                            },
+                            onDeleteNote = { newIndex, newNotes ->
+                                val updatedSegment = currentSegment.copy(notes = newNotes)
+                                val newSegments = segments.toMutableList()
+                                newSegments[currentSegmentIndex] = updatedSegment
+                                segments = newSegments
+                                currentNoteIndex = newIndex
+                            },
+                            onAddRest = { newNotes ->
+                                val updatedSegment = currentSegment.copy(notes = newNotes)
+                                val newSegments = segments.toMutableList()
+                                newSegments[currentSegmentIndex] = updatedSegment
+                                segments = newSegments
+                                currentNoteIndex = currentNoteIndex + 1
+                                accessibilityHelper.speak("添加停顿")
+                            },
+                            isLandscape = isLandscape
+                        )
+
+                        Spacer(modifier = Modifier.height(if (isLandscape) 4.dp else 12.dp))
+                    }
                 }
             }
         }

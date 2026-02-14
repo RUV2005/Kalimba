@@ -1,8 +1,6 @@
-// 文件名: KalimbaScreen.kt (重构版 - 添加设置按钮)
 package com.danmo.kalimba.main
 
-import android.content.Context
-import android.content.Intent
+import android.content.res.Configuration
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,50 +30,39 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.danmo.kalimba.AudioConstants
 import com.danmo.kalimba.R
 import com.danmo.kalimba.accessibility.AccessibilityHelper
 import com.danmo.kalimba.accessibility.VibrationType
-import com.danmo.kalimba.nmn.NMNActivity
-import com.danmo.kalimba.practice.PracticeActivity
-import com.danmo.kalimba.settings.SettingsActivity // ⚠️ 导入设置页面
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * 卡林巴琴主屏幕 - 自由探索模式 (重构版)
- * 使用统一的 AccessibilityHelper 管理语音和触觉反馈
+ * 卡林巴琴主屏幕 - 自由探索模式
  */
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun KalimbaScreen() {
+fun KalimbaScreen(
+    onNavigateToEditor: () -> Unit,
+    onNavigateToSettings: () -> Unit
+) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-    // 使用Compose的协程作用域
     val autoPlayScope = rememberCoroutineScope()
-
-    // 统一的无障碍辅助类
     val accessibilityHelper = remember { AccessibilityHelper(context) }
     val audioManager = remember { KalimbaAudioManager(context) }
 
     var isReady by remember { mutableStateOf(false) }
-
-    // 播放状态
     var isAutoPlay by remember { mutableStateOf(false) }
     var playSessionId by remember { mutableIntStateOf(0) }
-
-    // 演奏状态
     var lastPlayedKey by remember { mutableStateOf<KalimbaKey?>(null) }
     var playHistory by remember { mutableStateOf<List<KalimbaKey>>(emptyList()) }
     var totalPlays by remember { mutableIntStateOf(0) }
     var exploreStartTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var currentRippleKeyId by remember { mutableStateOf<String?>(null) }
 
-    // 互斥锁保护共享状态
     val clickMutex = remember { Mutex() }
 
     LaunchedEffect(Unit) {
@@ -92,46 +80,34 @@ fun KalimbaScreen() {
         }
     }
 
-    // 核心播放函数
     suspend fun playKey(key: KalimbaKey, skipAnnounce: Boolean) {
         clickMutex.withLock {
-            // 播放声音
             audioManager.play(key)
-
-            // 更新所有状态
             lastPlayedKey = key
             totalPlays++
             playHistory = listOf(key) + playHistory
             currentRippleKeyId = key.id
         }
-
-        // 波纹动画延迟
-        delay(AudioConstants.RIPPLE_ANIMATION_DELAY)
-
-        // 安全清除波纹
+        delay(50)
         clickMutex.withLock {
             if (currentRippleKeyId == key.id) {
                 currentRippleKeyId = null
             }
         }
-
-        // ⚠️ 关键修改：只在非 TalkBack 且手动开启语音时播报
-        // TalkBack 会通过 semantics { contentDescription } 自动播报
         if (!skipAnnounce &&
             accessibilityHelper.isSpeechEnabled &&
-            !accessibilityHelper.isTalkBackEnabled()) {
+            !accessibilityHelper.isTalkBackEnabled()
+        ) {
             accessibilityHelper.speak(key.getPositionDescription())
         }
     }
 
-    // 用户点击处理
     val handleKeyClick: (KalimbaKey) -> Unit = { key ->
         autoPlayScope.launch {
             playKey(key, skipAnnounce = false)
         }
     }
 
-    // 自动播放逻辑
     LaunchedEffect(playSessionId) {
         if (playSessionId < 0) return@LaunchedEffect
         if (!isAutoPlay) return@LaunchedEffect
@@ -142,7 +118,6 @@ fun KalimbaScreen() {
             return@LaunchedEffect
         }
 
-        // 播报开始
         accessibilityHelper.provideFeedback(
             text = "开始自动播放，共${historySnapshot.size}个音符",
             vibrationType = VibrationType.STRONG,
@@ -153,36 +128,31 @@ fun KalimbaScreen() {
 
         while (isAutoPlay) {
             if (!isFirstRound) {
-                delay(AudioConstants.AUTO_PLAY_ROUND_DELAY)
+                delay(1000)
                 if (!isAutoPlay) break
             }
             isFirstRound = false
 
-            // 遍历播放历史
             historySnapshot.forEachIndexed { index, key ->
                 if (!isAutoPlay) return@forEachIndexed
 
                 playKey(key, skipAnnounce = true)
-
-                // 触觉反馈
                 accessibilityHelper.vibrate(VibrationType.LIGHT)
 
-                // 进度播报（每5个音符）
                 if (accessibilityHelper.isSpeechEnabled &&
                     !accessibilityHelper.isTalkBackEnabled() &&
-                    index % 5 == 0 && index > 0) {
+                    index % 5 == 0 && index > 0
+                ) {
                     val remaining = historySnapshot.size - index
                     accessibilityHelper.speak(
                         "已播放${index}个，还剩${remaining}个",
                         interrupt = false
                     )
                 }
-
-                delay(AudioConstants.AUTO_PLAY_INTERVAL)
+                delay(500)
             }
         }
 
-        // 播报结束
         accessibilityHelper.provideFeedback(
             text = "自动播放已停止",
             vibrationType = VibrationType.MEDIUM,
@@ -190,7 +160,6 @@ fun KalimbaScreen() {
         )
     }
 
-    // 切换自动播放
     fun toggleAutoPlay() {
         if (isAutoPlay) {
             isAutoPlay = false
@@ -231,11 +200,11 @@ fun KalimbaScreen() {
                     }
                 },
                 actions = {
-                    // ⚠️ 新增：设置按钮
+                    // 设置按钮 - 使用自定义图标
                     IconButton(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
-                            context.startActivity(Intent(context, SettingsActivity::class.java))
+                            onNavigateToSettings()
                         },
                         modifier = Modifier.semantics {
                             contentDescription = "打开设置"
@@ -252,7 +221,6 @@ fun KalimbaScreen() {
                     IconButton(
                         onClick = {
                             toggleAutoPlay()
-                            // 触觉反馈
                             accessibilityHelper.vibrate(VibrationType.CLICK)
                         },
                         enabled = isReady && playHistory.isNotEmpty(),
@@ -279,7 +247,6 @@ fun KalimbaScreen() {
                     IconButton(
                         onClick = {
                             accessibilityHelper.toggleSpeech()
-                            // 触觉反馈
                             accessibilityHelper.vibrate(VibrationType.CLICK)
                         },
                         modifier = Modifier.semantics {
@@ -319,7 +286,6 @@ fun KalimbaScreen() {
                         .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // 状态指示器
                     if (isAutoPlay) {
                         Text(
                             "自动播放中...",
@@ -389,7 +355,7 @@ fun KalimbaScreen() {
                     OctaveLegend(modifier = Modifier.padding(bottom = 16.dp))
 
                     ModeSwitchButtons(
-                        context = context,
+                        onNavigateToLibrary = onNavigateToEditor,  // 只保留一个按钮
                         accessibilityHelper = accessibilityHelper,
                         modifier = Modifier.fillMaxWidth(0.9f)
                     )
@@ -401,9 +367,6 @@ fun KalimbaScreen() {
     }
 }
 
-/**
- * 竖屏键盘行
- */
 @Composable
 fun OctaveKeyboardRow(
     title: String,
@@ -442,9 +405,6 @@ fun OctaveKeyboardRow(
     }
 }
 
-/**
- * 横屏键盘列
- */
 @Composable
 fun OctaveKeyboardColumn(
     title: String,
@@ -490,9 +450,6 @@ fun OctaveKeyboardColumn(
     }
 }
 
-/**
- * 紧凑键盘行
- */
 @Composable
 fun KeyRowCompact(
     keys: List<KalimbaKey>,
@@ -516,9 +473,6 @@ fun KeyRowCompact(
     }
 }
 
-/**
- * 紧凑琴键按钮 - ⚠️ 关键修改
- */
 @Composable
 fun CompactKeyButton(
     key: KalimbaKey,
@@ -535,7 +489,6 @@ fun CompactKeyButton(
 
     val color = getOctaveColor(key.octave)
 
-    // ⚠️ 构建完整的语义描述（供 TalkBack 朗读）
     val semanticDescription = buildString {
         append(key.getPositionDescription())
         if (isRippling) {
@@ -552,20 +505,14 @@ fun CompactKeyButton(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = {
-                    // ⚠️ 添加触觉反馈
                     accessibilityHelper.vibrate(VibrationType.MEDIUM)
-
-                    // ⚠️ 只在非 TalkBack 且手动开启时播报
-                    // 因为 TalkBack 会自动读 contentDescription
                     if (!accessibilityHelper.isTalkBackEnabled() &&
                         accessibilityHelper.isSpeechEnabled) {
                         accessibilityHelper.speak(key.getPositionDescription())
                     }
-
                     onClick()
                 }
             )
-            // ⚠️ 添加完整的语义信息
             .semantics {
                 contentDescription = semanticDescription
             }
@@ -601,9 +548,6 @@ fun CompactKeyButton(
     }
 }
 
-/**
- * 音域图例
- */
 @Composable
 fun OctaveLegend(modifier: Modifier = Modifier) {
     Row(
@@ -633,64 +577,36 @@ fun OctaveLegendItem(label: String, color: Color) {
     }
 }
 
-/**
- * 模式切换按钮 - ⚠️ 添加触觉反馈
- */
 @Composable
 fun ModeSwitchButtons(
-    context: Context,
+    onNavigateToLibrary: () -> Unit,
     accessibilityHelper: AccessibilityHelper,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    Column(modifier = modifier) {
+        // 简谱库入口（包含编辑和练习）
         Button(
             onClick = {
                 accessibilityHelper.vibrate(VibrationType.CLICK)
-                context.startActivity(Intent(context, PracticeActivity::class.java))
+                onNavigateToLibrary()
             },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp)
                 .semantics {
-                    contentDescription = "进入分段教学模式，跟随引导学习经典曲目"
-                },
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("分段教学模式", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text("跟随引导学习经典曲目", fontSize = 12.sp, color = Color.White.copy(alpha = 0.8f))
-            }
-        }
-
-        Button(
-            onClick = {
-                accessibilityHelper.vibrate(VibrationType.CLICK)
-                context.startActivity(Intent(context, NMNActivity::class.java))
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-                .semantics {
-                    contentDescription = "进入简谱编辑模式，创建和编辑你的乐谱"
+                    contentDescription = "进入简谱库，管理乐谱、编辑或开始练习"
                 },
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("简谱编辑模式", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text("创建和编辑你的乐谱", fontSize = 12.sp, color = Color.White.copy(alpha = 0.8f))
+                Text("简谱库", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("浏览、编辑乐谱或开始练习", fontSize = 12.sp, color = Color.White.copy(alpha = 0.8f))
             }
         }
     }
 }
 
-/**
- * 加载中视图
- */
 @Composable
 fun LoadingView() {
     Box(
@@ -708,9 +624,6 @@ fun LoadingView() {
     }
 }
 
-/**
- * 格式化时长
- */
 private fun formatDuration(ms: Long): String {
     val seconds = ms / 1000
     val minutes = seconds / 60
@@ -722,9 +635,6 @@ private fun formatDuration(ms: Long): String {
     }
 }
 
-/**
- * 获取音域颜色
- */
 fun getOctaveColor(octave: Octave): Color = when (octave) {
     Octave.DOWN -> Color(0xFF795548)
     Octave.MIDDLE -> Color(0xFF4CAF50)

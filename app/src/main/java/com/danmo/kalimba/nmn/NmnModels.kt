@@ -1,6 +1,9 @@
 // 文件名: NmnModels.kt
 package com.danmo.kalimba.nmn
 
+import com.danmo.kalimba.data.local.NoteData
+import com.danmo.kalimba.data.local.SegmentData
+
 enum class Octave {
     DOWN, MIDDLE, HIGH, HIGH_HIGH
 }
@@ -33,4 +36,26 @@ data class NmnNote(
 
     // 判断是否为休止符
     fun isRestNote(): Boolean = isRest || keyId == "rest"
+
+
+    // 建议在 NmnNote / NmnSegment 的定义处添加这些转换扩展
+    fun SegmentData.toDomainModel(): NmnSegment {
+        return NmnSegment(
+            id = this.id,
+            name = this.name,
+            notes = this.notes.map { it.toDomainModel() }
+        )
+    }
+
+    fun NoteData.toDomainModel(): NmnNote {
+        return if (this.isRest) {
+            NmnNote.createRest(this.durationMs)
+        } else {
+            NmnNote(
+                keyId = this.keyId,
+                pitch = this.pitch,
+                octave = Octave.valueOf(this.octave) // 确保这里的 Octave 枚举一致
+            )
+        }
+    }
 }

@@ -1,35 +1,42 @@
-// 文件名: SettingsScreen.kt
 package com.danmo.kalimba.settings
 
 import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import coil.compose.AsyncImage
 import com.danmo.kalimba.R
 import com.danmo.kalimba.accessibility.AccessibilityHelper
 import com.danmo.kalimba.accessibility.VibrationType
+import com.danmo.kalimba.data.local.AuthDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-// DataStore 扩展
 private val Context.dataStore by preferencesDataStore(name = "app_settings")
 
-/**
- * 应用设置数据类
- */
 data class AppSettings(
     val speechEnabled: Boolean = false,
     val vibrationEnabled: Boolean = true,
@@ -46,14 +53,11 @@ data class AppSettings(
     val largeTextMode: Boolean = false,
     val autoSave: Boolean = true,
     val defaultBpm: Int = 80,
-    val showGridLines: Boolean = true
+    val showGridLines: Boolean = true,
+    val inAppSpeechEnabled: Boolean = false
 )
 
-/**
- * 设置管理器
- */
 class SettingsManager(private val context: Context) {
-
     private object PreferencesKeys {
         val SPEECH_ENABLED = booleanPreferencesKey("speech_enabled")
         val VIBRATION_ENABLED = booleanPreferencesKey("vibration_enabled")
@@ -71,6 +75,7 @@ class SettingsManager(private val context: Context) {
         val AUTO_SAVE = booleanPreferencesKey("auto_save")
         val DEFAULT_BPM = intPreferencesKey("default_bpm")
         val SHOW_GRID_LINES = booleanPreferencesKey("show_grid_lines")
+        val IN_APP_SPEECH_ENABLED = booleanPreferencesKey("in_app_speech_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -90,7 +95,8 @@ class SettingsManager(private val context: Context) {
             largeTextMode = prefs[PreferencesKeys.LARGE_TEXT_MODE] ?: false,
             autoSave = prefs[PreferencesKeys.AUTO_SAVE] ?: true,
             defaultBpm = prefs[PreferencesKeys.DEFAULT_BPM] ?: 80,
-            showGridLines = prefs[PreferencesKeys.SHOW_GRID_LINES] ?: true
+            showGridLines = prefs[PreferencesKeys.SHOW_GRID_LINES] ?: true,
+            inAppSpeechEnabled = prefs[PreferencesKeys.IN_APP_SPEECH_ENABLED] ?: true
         )
     }
 
@@ -142,21 +148,43 @@ class SettingsManager(private val context: Context) {
     suspend fun updateShowGridLines(show: Boolean) {
         context.dataStore.edit { prefs -> prefs[PreferencesKeys.SHOW_GRID_LINES] = show }
     }
+    suspend fun updateInAppSpeechEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.IN_APP_SPEECH_ENABLED] = enabled
+        }
+    }
 }
 
-/**
- * 主设置界面 - 使用自定义图标资源
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    accessibilityHelper: AccessibilityHelper,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onNavigateToLogin: () -> Unit = {}  // ✅ 新增：跳转登录页
 ) {
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
+    val authDataStore = remember { AuthDataStore(context) }
     val settings by settingsManager.settingsFlow.collectAsState(initial = AppSettings())
     val scope = rememberCoroutineScope()
+    val accessibilityHelper = remember { AccessibilityHelper(context) }
+
+    // ✅ 获取登录状态和用户信息
+    var isLoggedIn by remember { mutableStateOf(false) }
+    var username by remember { mutableStateOf("") }
+    var nickname by remember { mutableStateOf<String?>(null) }
+    var avatar by remember { mutableStateOf<String?>(null) }
+    var showLogoutDialog by remember { mutableStateOf(false) }
+
+    // 检查登录状态
+    LaunchedEffect(Unit) {
+        isLoggedIn = authDataStore.checkIsLoggedIn()
+        if (isLoggedIn) {
+            val user = authDataStore.getUserInfo()
+            username = user?.username ?: ""
+            nickname = user?.nickname
+            avatar = user?.avatar
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -181,7 +209,25 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            // ========== 无障碍设置 ==========
+            // ✅ 用户信息卡片
+            UserInfoCard(
+                isLoggedIn = isLoggedIn,
+                username = username,
+                nickname = nickname,
+                avatar = avatar,
+                onLoginClick = {
+                    accessibilityHelper.vibrate(VibrationType.CLICK)
+                    onNavigateToLogin()
+                },
+                onLogoutClick = {
+                    accessibilityHelper.vibrate(VibrationType.CLICK)
+                    showLogoutDialog = true
+                }
+            )
+
+            HorizontalDivider()
+
+            // 无障碍设置
             SettingsSection(
                 title = "无障碍",
                 iconResId = R.drawable.ic_accessibility
@@ -245,25 +291,11 @@ fun SettingsScreen(
                         }
                     )
                 }
-
-                SliderSetting(
-                    title = "自动播放播报间隔",
-                    subtitle = "每播放N个音符后播报进度",
-                    value = settings.autoPlayAnnounceInterval.toFloat(),
-                    valueRange = 1f..10f,
-                    steps = 8,
-                    onValueChange = { interval ->
-                        scope.launch {
-                            settingsManager.updateAutoPlayAnnounceInterval(interval.toInt())
-                        }
-                    },
-                    valueLabel = { "${it.toInt()}个音符" }
-                )
             }
 
             HorizontalDivider()
 
-            // ========== 音频设置 ==========
+            // 音频设置
             SettingsSection(
                 title = "音频",
                 iconResId = R.drawable.ic_volume_up
@@ -298,25 +330,11 @@ fun SettingsScreen(
                     },
                     valueLabel = { "${it.toInt()} BPM" }
                 )
-
-                DropdownSetting(
-                    title = "音色",
-                    options = listOf(
-                        "default" to "标准",
-                        "wood" to "木质",
-                        "crystal" to "水晶",
-                        "electronic" to "电子"
-                    ),
-                    selectedValue = settings.soundSet,
-                    onValueChange = { soundSet ->
-                        scope.launch { settingsManager.updateSoundSet(soundSet) }
-                    }
-                )
             }
 
             HorizontalDivider()
 
-            // ========== 显示设置 ==========
+            // 显示设置
             SettingsSection(
                 title = "显示",
                 iconResId = R.drawable.ic_visibility
@@ -360,7 +378,7 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
-            // ========== 编辑设置 ==========
+            // 编辑设置
             SettingsSection(
                 title = "简谱编辑",
                 iconResId = R.drawable.ic_edit
@@ -397,7 +415,7 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
-            // ========== 关于 ==========
+            // 关于
             SettingsSection(
                 title = "关于",
                 iconResId = R.drawable.ic_info
@@ -412,7 +430,6 @@ fun SettingsScreen(
                 )
             }
 
-            // 提示信息
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.secondaryContainer
@@ -440,9 +457,170 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
+
+    // ✅ 登出确认对话框
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogoutDialog = false },
+            title = { Text("确认退出登录") },
+            text = { Text("退出登录后，您将无法上传简谱到云端。本地简谱不会受影响。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            authDataStore.clearAuth()
+                            isLoggedIn = false
+                            username = ""
+                            nickname = null
+                            avatar = null
+                            showLogoutDialog = false
+                            accessibilityHelper.provideFeedback(
+                                text = "已退出登录",
+                                vibrationType = VibrationType.MEDIUM
+                            )
+                        }
+                    }
+                ) {
+                    Text("退出登录", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }
 
-// ========== 通用设置组件 ==========
+/**
+ * ✅ 用户信息卡片
+ */
+@Composable
+private fun UserInfoCard(
+    isLoggedIn: Boolean,
+    username: String,
+    nickname: String?,
+    avatar: String?,
+    onLoginClick: () -> Unit,
+    onLogoutClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        if (isLoggedIn) {
+            // 已登录状态
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    // 头像
+                    if (avatar != null) {
+                        AsyncImage(
+                            model = avatar,
+                            contentDescription = "用户头像",
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.AccountCircle,
+                            contentDescription = "默认头像",
+                            modifier = Modifier.size(56.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    // 用户信息
+                    Column {
+                        Text(
+                            text = nickname ?: username,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (nickname != null) {
+                            Text(
+                                text = "@$username",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF4CAF50))
+                            )
+                            Text(
+                                text = "已登录",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                }
+
+                // 退出登录按钮
+                IconButton(onClick = onLogoutClick) {
+                    Icon(
+                        imageVector = Icons.Default.ExitToApp,
+                        contentDescription = "退出登录",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        } else {
+            // 未登录状态
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = "未登录",
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.5f)
+                )
+                Text(
+                    text = "未登录",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
+                Button(
+                    onClick = onLoginClick,
+                    modifier = Modifier.fillMaxWidth(0.6f)
+                ) {
+                    Text("登录 / 注册")
+                }
+                Text(
+                    text = "登录后可将简谱同步到云端",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun SettingsSection(
@@ -570,40 +748,4 @@ private fun RadioGroupSetting(
             }
         }
     }
-}
-
-@Composable
-private fun DropdownSetting(
-    title: String,
-    options: List<Pair<String, String>>,
-    selectedValue: String,
-    onValueChange: (String) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selectedLabel = options.find { it.first == selectedValue }?.second ?: selectedValue
-
-    ListItem(
-        headlineContent = { Text(title) },
-        trailingContent = {
-            Box {
-                TextButton(onClick = { expanded = true }) {
-                    Text(selectedLabel)
-                }
-                DropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false }
-                ) {
-                    options.forEach { (value, label) ->
-                        DropdownMenuItem(
-                            text = { Text(label) },
-                            onClick = {
-                                onValueChange(value)
-                                expanded = false
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    )
 }
