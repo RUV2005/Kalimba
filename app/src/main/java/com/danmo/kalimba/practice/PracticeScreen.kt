@@ -16,17 +16,19 @@ import com.danmo.kalimba.R
 import com.danmo.kalimba.accessibility.AccessibilityHelper
 import com.danmo.kalimba.accessibility.VibrationType
 import com.danmo.kalimba.data.local.KalimbaDatabase
+import com.danmo.kalimba.metronome.MetronomeManager
+import com.danmo.kalimba.settings.AppSettings
+import com.danmo.kalimba.settings.SettingsManager
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PracticeScreen(
-    sheetId: Long,  // 改为非空，必须从简谱库传入
+    sheetId: Long,
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
     val database = remember { KalimbaDatabase.getDatabase(context) }
-
     val viewModel: PracticeViewModel = viewModel(
         factory = PracticeViewModel.Factory(sheetId, database)
     )
@@ -35,28 +37,46 @@ fun PracticeScreen(
     val audioManager = remember { PracticeAudioManager(context) }
     val accessibilityHelper = remember { AccessibilityHelper(context) }
 
+    // ✅ 读取节拍器设置
+    val settingsManager = remember { SettingsManager(context) }
+    val settings by settingsManager.settingsFlow.collectAsState(initial = AppSettings())
+
+    val metronome = remember { MetronomeManager(context, accessibilityHelper) }
+    var isMetronomeEnabled by remember { mutableStateOf(settings.metronomeEnabled) }
+
     var currentSegmentIndex by remember { mutableIntStateOf(0) }
     var currentNoteIndex by remember { mutableIntStateOf(0) }
     var isPreviewing by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // 从 ViewModel 获取当前段落
     val segments = uiState.segments
     val currentSegment = segments.getOrNull(currentSegmentIndex)
 
-    // 音频管理器初始化
     LaunchedEffect(Unit) {
         while (!audioManager.isReady() || !accessibilityHelper.isReady()) {
             delay(100L)
         }
     }
+    // ✅ 当设置变化时同步状态
+    LaunchedEffect(settings.metronomeEnabled) {
+        isMetronomeEnabled = settings.metronomeEnabled
+        if (isMetronomeEnabled && !metronome.isRunning()) {
+            metronome.startWithSettings(
+                bpm = settings.defaultMetronomeBpm,
+                beatsPerBar = settings.metronomeBeatsPerMeasure,
+                metronomeVolume = settings.metronomeVolume,
+                metronomeVibration = settings.metronomeVibrationEnabled,
+                accentFirst = settings.metronomeAccentFirstBeat
+            )
+        }
+    }
 
-    // 清理
     DisposableEffect(Unit) {
         onDispose {
             audioManager.stopPreview()
             audioManager.release()
             accessibilityHelper.release()
+            metronome.release() // ✅ 清理节拍器
         }
     }
 
@@ -68,6 +88,7 @@ fun PracticeScreen(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
                             audioManager.stopPreview()
+                            metronome.stop() // ✅ 返回时停止
                             onNavigateBack()
                         }
                     ) {
@@ -84,7 +105,36 @@ fun PracticeScreen(
                     )
                 },
                 actions = {
-                    // 显示当前段落信息
+                    IconButton(
+                        onClick = {
+                            isMetronomeEnabled = !isMetronomeEnabled
+                            if (isMetronomeEnabled) {
+                                metronome.startWithSettings(
+                                    bpm = settings.defaultMetronomeBpm,
+                                    beatsPerBar = settings.metronomeBeatsPerMeasure,
+                                    metronomeVolume = settings.metronomeVolume,
+                                    metronomeVibration = settings.metronomeVibrationEnabled,
+                                    accentFirst = settings.metronomeAccentFirstBeat
+                                )
+                            } else {
+                                metronome.stop()
+                            }
+                            accessibilityHelper.vibrate(VibrationType.CLICK)
+                        }
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                id = if (isMetronomeEnabled) R.drawable.ic_volume_up
+                                else R.drawable.ic_volume_off
+                            ),
+                            contentDescription = if (isMetronomeEnabled) "关闭节拍器" else "开启节拍器",
+                            tint = if (isMetronomeEnabled)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
                     if (currentSegment != null) {
                         Text(
                             text = "${currentSegmentIndex + 1}/${segments.size}",
@@ -103,26 +153,18 @@ fun PracticeScreen(
                 .padding(16.dp)
         ) {
             when {
-                uiState.isLoading -> {
-                    LoadingView()
-                }
-                uiState.error != null -> {
-                    ErrorView(
-                        message = uiState.error!!,
-                        onRetry = {
-                            // 重新加载
-                            val intent = context.packageManager
-                                .getLaunchIntentForPackage(context.packageName)
-                            intent?.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            context.startActivity(intent)
-                        }
-                    )
-                }
-                segments.isEmpty() -> {
-                    EmptyView()
-                }
+                uiState.isLoading -> LoadingView()
+                uiState.error != null -> ErrorView(
+                    message = uiState.error!!,
+                    onRetry = {
+                        val intent = context.packageManager
+                            .getLaunchIntentForPackage(context.packageName)
+                        intent?.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        context.startActivity(intent)
+                    }
+                )
+                segments.isEmpty() -> EmptyView()
                 currentSegment == null -> {
-                    // 段落索引越界，重置
                     LaunchedEffect(Unit) {
                         currentSegmentIndex = 0
                     }

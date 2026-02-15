@@ -31,7 +31,6 @@ import com.danmo.kalimba.accessibility.AccessibilityHelper
 import com.danmo.kalimba.accessibility.VibrationType
 import com.danmo.kalimba.data.local.AuthDataStore
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -54,7 +53,14 @@ data class AppSettings(
     val autoSave: Boolean = true,
     val defaultBpm: Int = 80,
     val showGridLines: Boolean = true,
-    val inAppSpeechEnabled: Boolean = false
+    val inAppSpeechEnabled: Boolean = false,
+    // ✅ 节拍器设置
+    val metronomeEnabled: Boolean = false,
+    val defaultMetronomeBpm: Int = 80,
+    val metronomeBeatsPerMeasure: Int = 4,
+    val metronomeVolume: Float = 0.8f,           // ✅ 新增：节拍器音量
+    val metronomeVibrationEnabled: Boolean = true, // ✅ 新增：节拍器振动
+    val metronomeAccentFirstBeat: Boolean = true   // ✅ 新增：强调首拍
 )
 
 class SettingsManager(private val context: Context) {
@@ -76,6 +82,13 @@ class SettingsManager(private val context: Context) {
         val DEFAULT_BPM = intPreferencesKey("default_bpm")
         val SHOW_GRID_LINES = booleanPreferencesKey("show_grid_lines")
         val IN_APP_SPEECH_ENABLED = booleanPreferencesKey("in_app_speech_enabled")
+        // ✅ 节拍器相关键
+        val METRONOME_ENABLED = booleanPreferencesKey("metronome_enabled")
+        val DEFAULT_METRONOME_BPM = intPreferencesKey("default_metronome_bpm")
+        val METRONOME_BEATS_PER_MEASURE = intPreferencesKey("metronome_beats_per_measure")
+        val METRONOME_VOLUME = floatPreferencesKey("metronome_volume")
+        val METRONOME_VIBRATION_ENABLED = booleanPreferencesKey("metronome_vibration_enabled")
+        val METRONOME_ACCENT_FIRST_BEAT = booleanPreferencesKey("metronome_accent_first_beat")
     }
 
     val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -96,10 +109,18 @@ class SettingsManager(private val context: Context) {
             autoSave = prefs[PreferencesKeys.AUTO_SAVE] ?: true,
             defaultBpm = prefs[PreferencesKeys.DEFAULT_BPM] ?: 80,
             showGridLines = prefs[PreferencesKeys.SHOW_GRID_LINES] ?: true,
-            inAppSpeechEnabled = prefs[PreferencesKeys.IN_APP_SPEECH_ENABLED] ?: true
+            inAppSpeechEnabled = prefs[PreferencesKeys.IN_APP_SPEECH_ENABLED] ?: true,
+            // ✅ 节拍器设置读取
+            metronomeEnabled = prefs[PreferencesKeys.METRONOME_ENABLED] ?: false,
+            defaultMetronomeBpm = prefs[PreferencesKeys.DEFAULT_METRONOME_BPM] ?: 80,
+            metronomeBeatsPerMeasure = prefs[PreferencesKeys.METRONOME_BEATS_PER_MEASURE] ?: 4,
+            metronomeVolume = prefs[PreferencesKeys.METRONOME_VOLUME] ?: 0.8f,
+            metronomeVibrationEnabled = prefs[PreferencesKeys.METRONOME_VIBRATION_ENABLED] ?: true,
+            metronomeAccentFirstBeat = prefs[PreferencesKeys.METRONOME_ACCENT_FIRST_BEAT] ?: true
         )
     }
 
+    // ✅ 现有方法保持不变
     suspend fun updateSpeechEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PreferencesKeys.SPEECH_ENABLED] = enabled }
     }
@@ -153,13 +174,50 @@ class SettingsManager(private val context: Context) {
             prefs[PreferencesKeys.IN_APP_SPEECH_ENABLED] = enabled
         }
     }
+
+    // ✅ 新增：节拍器相关更新方法
+    suspend fun updateMetronomeEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.METRONOME_ENABLED] = enabled
+        }
+    }
+
+    suspend fun updateDefaultMetronomeBpm(bpm: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.DEFAULT_METRONOME_BPM] = bpm
+        }
+    }
+
+    suspend fun updateMetronomeBeatsPerMeasure(beats: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.METRONOME_BEATS_PER_MEASURE] = beats
+        }
+    }
+
+    suspend fun updateMetronomeVolume(volume: Float) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.METRONOME_VOLUME] = volume
+        }
+    }
+
+    suspend fun updateMetronomeVibrationEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.METRONOME_VIBRATION_ENABLED] = enabled
+        }
+    }
+
+    suspend fun updateMetronomeAccentFirstBeat(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.METRONOME_ACCENT_FIRST_BEAT] = enabled
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
-    onNavigateToLogin: () -> Unit = {}  // ✅ 新增：跳转登录页
+    onNavigateToLogin: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
@@ -168,14 +226,12 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val accessibilityHelper = remember { AccessibilityHelper(context) }
 
-    // ✅ 获取登录状态和用户信息
     var isLoggedIn by remember { mutableStateOf(false) }
     var username by remember { mutableStateOf("") }
     var nickname by remember { mutableStateOf<String?>(null) }
     var avatar by remember { mutableStateOf<String?>(null) }
     var showLogoutDialog by remember { mutableStateOf(false) }
 
-    // 检查登录状态
     LaunchedEffect(Unit) {
         isLoggedIn = authDataStore.checkIsLoggedIn()
         if (isLoggedIn) {
@@ -209,7 +265,6 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-            // ✅ 用户信息卡片
             UserInfoCard(
                 isLoggedIn = isLoggedIn,
                 username = username,
@@ -334,6 +389,99 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            // ✅ 新增：节拍器设置
+            SettingsSection(
+                title = "节拍器",
+                iconResId = R.drawable.ic_play  // 使用播放图标，或添加专门的节拍器图标
+            ) {
+                SwitchSetting(
+                    title = "默认启用节拍器",
+                    subtitle = "进入练习模式时自动开启",
+                    checked = settings.metronomeEnabled,
+                    onCheckedChange = { enabled ->
+                        scope.launch {
+                            settingsManager.updateMetronomeEnabled(enabled)
+                            accessibilityHelper.speak(
+                                if (enabled) "节拍器将默认启用" else "节拍器将默认关闭"
+                            )
+                        }
+                    }
+                )
+
+                SliderSetting(
+                    title = "默认速度",
+                    subtitle = "练习模式的初始节拍速度",
+                    value = settings.defaultMetronomeBpm.toFloat(),
+                    valueRange = 40f..200f,
+                    steps = 31,  // 40, 45, 50... 200 (每5一档)
+                    onValueChange = { bpm ->
+                        scope.launch {
+                            settingsManager.updateDefaultMetronomeBpm(bpm.toInt())
+                        }
+                    },
+                    valueLabel = { "${it.toInt()} BPM" }
+                )
+
+                RadioGroupSetting(
+                    title = "拍号",
+                    options = listOf(
+                        2 to "2/4（2拍）",
+                        3 to "3/4（3拍）",
+                        4 to "4/4（4拍）",
+                        6 to "6/8（6拍）"
+                    ),
+                    selectedValue = settings.metronomeBeatsPerMeasure,
+                    onValueChange = { beats ->
+                        scope.launch {
+                            settingsManager.updateMetronomeBeatsPerMeasure(beats)
+                            accessibilityHelper.speak("拍号已设为${beats}拍")
+                        }
+                    }
+                )
+
+                SliderSetting(
+                    title = "节拍器音量",
+                    value = settings.metronomeVolume,
+                    valueRange = 0f..1f,
+                    onValueChange = { volume ->
+                        scope.launch {
+                            settingsManager.updateMetronomeVolume(volume)
+                        }
+                    },
+                    valueLabel = { "${(it * 100).toInt()}%" }
+                )
+
+                SwitchSetting(
+                    title = "节拍振动",
+                    subtitle = "节拍时同步振动反馈",
+                    checked = settings.metronomeVibrationEnabled,
+                    onCheckedChange = { enabled ->
+                        scope.launch {
+                            settingsManager.updateMetronomeVibrationEnabled(enabled)
+                            if (enabled) {
+                                accessibilityHelper.vibrate(VibrationType.LIGHT)
+                            }
+                        }
+                    }
+                )
+
+                SwitchSetting(
+                    title = "强调首拍",
+                    subtitle = "每小节第一拍使用不同音效",
+                    checked = settings.metronomeAccentFirstBeat,
+                    onCheckedChange = { enabled ->
+                        scope.launch {
+                            settingsManager.updateMetronomeAccentFirstBeat(enabled)
+                            accessibilityHelper.speak(
+                                if (enabled) "将强调首拍" else "首拍不强调"
+                            )
+                        }
+                    }
+                )
+            }
+
+            HorizontalDivider()
+
             // 显示设置
             SettingsSection(
                 title = "显示",
@@ -378,7 +526,7 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
-            // 编辑设置
+            // 简谱编辑设置
             SettingsSection(
                 title = "简谱编辑",
                 iconResId = R.drawable.ic_edit
@@ -447,6 +595,7 @@ fun SettingsScreen(
                     Text(
                         "• 如果您正在使用 TalkBack，建议关闭应用内语音播报\n" +
                                 "• 振动反馈可帮助您确认操作是否成功\n" +
+                                "• 节拍器可帮助您保持稳定的演奏节奏\n" +
                                 "• 设置会自动保存",
                         style = MaterialTheme.typography.bodyMedium,
                         fontSize = 14.sp
@@ -458,7 +607,6 @@ fun SettingsScreen(
         }
     }
 
-    // ✅ 登出确认对话框
     if (showLogoutDialog) {
         AlertDialog(
             onDismissRequest = { showLogoutDialog = false },
@@ -493,9 +641,7 @@ fun SettingsScreen(
     }
 }
 
-/**
- * ✅ 用户信息卡片
- */
+// ✅ 以下辅助 Composable 保持不变
 @Composable
 private fun UserInfoCard(
     isLoggedIn: Boolean,
@@ -512,7 +658,6 @@ private fun UserInfoCard(
         )
     ) {
         if (isLoggedIn) {
-            // 已登录状态
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -525,7 +670,6 @@ private fun UserInfoCard(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
-                    // 头像
                     if (avatar != null) {
                         AsyncImage(
                             model = avatar,
@@ -544,7 +688,6 @@ private fun UserInfoCard(
                         )
                     }
 
-                    // 用户信息
                     Column {
                         Text(
                             text = nickname ?: username,
@@ -577,7 +720,6 @@ private fun UserInfoCard(
                     }
                 }
 
-                // 退出登录按钮
                 IconButton(onClick = onLogoutClick) {
                     Icon(
                         imageVector = Icons.Default.ExitToApp,
@@ -587,7 +729,6 @@ private fun UserInfoCard(
                 }
             }
         } else {
-            // 未登录状态
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
