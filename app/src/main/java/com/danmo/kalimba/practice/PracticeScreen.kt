@@ -25,7 +25,8 @@ import kotlinx.coroutines.delay
 @Composable
 fun PracticeScreen(
     sheetId: Long,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onNavigateToSmartPractice: (Int, Int) -> Unit  // ✅ 简化：只需要段落索引和BPM
 ) {
     val context = LocalContext.current
     val database = remember { KalimbaDatabase.getDatabase(context) }
@@ -37,7 +38,6 @@ fun PracticeScreen(
     val audioManager = remember { PracticeAudioManager(context) }
     val accessibilityHelper = remember { AccessibilityHelper(context) }
 
-    // ✅ 读取节拍器设置
     val settingsManager = remember { SettingsManager(context) }
     val settings by settingsManager.settingsFlow.collectAsState(initial = AppSettings())
 
@@ -52,22 +52,10 @@ fun PracticeScreen(
     val segments = uiState.segments
     val currentSegment = segments.getOrNull(currentSegmentIndex)
 
+    // 初始化音频
     LaunchedEffect(Unit) {
         while (!audioManager.isReady() || !accessibilityHelper.isReady()) {
             delay(100L)
-        }
-    }
-    // ✅ 当设置变化时同步状态
-    LaunchedEffect(settings.metronomeEnabled) {
-        isMetronomeEnabled = settings.metronomeEnabled
-        if (isMetronomeEnabled && !metronome.isRunning()) {
-            metronome.startWithSettings(
-                bpm = settings.defaultMetronomeBpm,
-                beatsPerBar = settings.metronomeBeatsPerMeasure,
-                metronomeVolume = settings.metronomeVolume,
-                metronomeVibration = settings.metronomeVibrationEnabled,
-                accentFirst = settings.metronomeAccentFirstBeat
-            )
         }
     }
 
@@ -75,8 +63,8 @@ fun PracticeScreen(
         onDispose {
             audioManager.stopPreview()
             audioManager.release()
+            metronome.release()
             accessibilityHelper.release()
-            metronome.release() // ✅ 清理节拍器
         }
     }
 
@@ -88,7 +76,7 @@ fun PracticeScreen(
                         onClick = {
                             accessibilityHelper.vibrate(VibrationType.CLICK)
                             audioManager.stopPreview()
-                            metronome.stop() // ✅ 返回时停止
+                            metronome.stop()
                             onNavigateBack()
                         }
                     ) {
@@ -105,6 +93,25 @@ fun PracticeScreen(
                     )
                 },
                 actions = {
+                    // ✅ 智能跟练按钮
+                    if (currentSegment != null && currentSegment.notes.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                accessibilityHelper.vibrate(VibrationType.CLICK)
+                                accessibilityHelper.speak("进入智能跟练模式")
+                                // ✅ 简化调用，只传索引和BPM
+                                onNavigateToSmartPractice(currentSegmentIndex, uiState.bpm)
+                            }
+                        ) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_music_note),
+                                contentDescription = "智能跟练",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    // 节拍器按钮
                     IconButton(
                         onClick = {
                             isMetronomeEnabled = !isMetronomeEnabled

@@ -92,6 +92,12 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
 
+    implementation("be.tarsos.dsp:core:2.5")
+    implementation("be.tarsos.dsp:jvm:2.5")
+
+    // ✅ 权限请求（如果还没有）
+    implementation("androidx.activity:activity-compose:1.8.2")
+
     // Gson
     implementation("com.google.code.gson:gson:2.10.1")
 
