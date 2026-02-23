@@ -1,6 +1,5 @@
 package com.danmo.kalimba.sheetlist
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,25 +15,23 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.danmo.kalimba.R
 import com.danmo.kalimba.accessibility.AccessibilityHelper
-import com.danmo.kalimba.accessibility.VibrationType
 import com.danmo.kalimba.data.SheetMusicRepository
 import com.danmo.kalimba.data.local.AuthDataStore
 import com.danmo.kalimba.data.local.KalimbaDatabase
 import com.danmo.kalimba.data.local.SheetMusicEntity
+import com.danmo.kalimba.data.remote.AuthApiService
 import com.danmo.kalimba.data.remote.KalimbaApiService
 import com.danmo.kalimba.data.remote.SheetMusicDto
+import com.danmo.kalimba.data.remote.TokenRefreshInterceptor
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import java.text.SimpleDateFormat
-import java.util.*
 import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -50,9 +47,15 @@ fun SheetListScreen(
     val authDataStore = remember { AuthDataStore(context) }
     val accessibilityHelper = remember { AccessibilityHelper(context) }
 
-    val repository: SheetMusicRepository = remember {
-        val apiService = provideKalimbaApi()
-        SheetMusicRepository(db.sheetMusicDao(), apiService, authDataStore)
+    // ✅ 创建 AuthApiService（用于Token刷新）
+    val authApiService = remember {
+        AuthApiService("https://guangji.online/api/")
+    }
+
+    // ✅ 创建 Repository（传入所有依赖）
+    val repository: SheetMusicRepository = remember(authDataStore, authApiService) {
+        val kalimbaApiService = provideKalimbaApi(authDataStore, authApiService)
+        SheetMusicRepository(db.sheetMusicDao(), kalimbaApiService, authDataStore)
     }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -112,7 +115,7 @@ fun SheetListScreen(
         )
     }
 
-    // 上传确认
+// 在上传确认对话框中捕获异常
     sheetToUpload?.let { sheet ->
         AlertDialog(
             onDismissRequest = { sheetToUpload = null },
@@ -125,14 +128,23 @@ fun SheetListScreen(
                             val isLoggedIn = authDataStore.checkIsLoggedIn()
                             if (!isLoggedIn) {
                                 sheetToUpload = null
+                                uploadMessage = "请先登录"
                                 onNavigateToLogin()
                             } else {
                                 try {
                                     val result = repository.uploadSheet(sheet)
                                     if (result.isSuccess) {
-                                        uploadMessage = "上传成功！分享码：${result.getOrNull()?.shareCode}"
+                                        uploadMessage = "上传成功！分享码：${result.getOrNull()?.shareCode ?: "无"}"
                                     } else {
-                                        uploadMessage = "上传失败：${result.exceptionOrNull()?.message}"
+                                        val error = result.exceptionOrNull()
+
+                                        // ✅ 检查是否是Token过期错误
+                                        if (error is com.danmo.kalimba.data.remote.TokenExpiredException) {
+                                            uploadMessage = "登录已过期，请重新登录"
+                                            onNavigateToLogin()
+                                        } else {
+                                            uploadMessage = "上传失败：${error?.message}"
+                                        }
                                     }
                                 } catch (e: Exception) {
                                     uploadMessage = "错误：${e.message}"
@@ -220,6 +232,36 @@ fun SheetListScreen(
     }
 }
 
+// ✅ 修改后的 provideKalimbaApi 函数（接收参数）
+private fun provideKalimbaApi(
+    authDataStore: AuthDataStore,
+    authApiService: AuthApiService
+): KalimbaApiService {
+    val logging = HttpLoggingInterceptor().apply {
+        level = HttpLoggingInterceptor.Level.BODY
+    }
+
+    // ✅ 创建Token刷新拦截器
+    val tokenRefreshInterceptor = TokenRefreshInterceptor(authDataStore, authApiService)
+
+    val client = OkHttpClient.Builder()
+        .addInterceptor(logging)
+        .addInterceptor(tokenRefreshInterceptor)  // ✅ 添加刷新拦截器
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    return Retrofit.Builder()
+        .baseUrl("https://guangji.online/")
+        .client(client)
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+        .create(KalimbaApiService::class.java)
+}
+
+// ==================== 其他 Composable ====================
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CloudSheetBrowser(
@@ -235,13 +277,10 @@ fun CloudSheetBrowser(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var shareCodeInput by remember { mutableStateOf("") }
-
-    // 0: 公开广场, 1: 我的云端, 2: 分享码下载
     var selectedTab by remember { mutableIntStateOf(0) }
 
     val scope = rememberCoroutineScope()
 
-    // 核心加载逻辑
     val loadData = {
         scope.launch {
             isLoading = true
@@ -265,9 +304,9 @@ fun CloudSheetBrowser(
 
     LaunchedEffect(selectedTab) {
         isLoggedIn = authDataStore.checkIsLoggedIn()
-        if (selectedTab < 2) { // 广场或个人云端
+        if (selectedTab < 2) {
             if (selectedTab == 1 && !isLoggedIn) {
-                // 如果选“我的”但未登录，不加载
+                // 未登录不加载
             } else {
                 loadData()
             }
@@ -289,13 +328,11 @@ fun CloudSheetBrowser(
         text = {
             Box(modifier = Modifier.fillMaxWidth().height(400.dp)) {
                 if (selectedTab == 1 && !isLoggedIn) {
-                    // 我的云端 - 未登录处理
                     Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
                         Text("请登录以同步您的云端简谱")
                         Button(onClick = { onDismiss(); onNavigateToLogin() }) { Text("前往登录") }
                     }
                 } else if (selectedTab == 2) {
-                    // 分享码下载页
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         OutlinedTextField(
                             value = shareCodeInput,
@@ -307,7 +344,6 @@ fun CloudSheetBrowser(
                         errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     }
                 } else {
-                    // 列表展示（广场或我的）
                     if (isLoading) {
                         CircularProgressIndicator(Modifier.align(Alignment.Center))
                     } else if (cloudSheets.isEmpty()) {
@@ -356,7 +392,12 @@ fun CloudSheetBrowser(
 
 @Composable
 fun CloudSheetItem(sheet: SheetMusicDto, onDownload: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(sheet.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
@@ -382,7 +423,11 @@ fun SheetMusicItem(
     Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(Modifier.size(40.dp), shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.primaryContainer) {
+                Surface(
+                    Modifier.size(40.dp),
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(painterResource(R.drawable.ic_music_note), null, tint = MaterialTheme.colorScheme.primary)
                     }
@@ -390,25 +435,45 @@ fun SheetMusicItem(
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(sheet.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("${sheet.totalNotes}个音符 · ${if(sheet.isUploaded) "已同步" else "未同步"}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text(
+                        "${sheet.totalNotes}个音符 · ${if(sheet.isUploaded) "已同步" else "未同步"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton(painterResource(R.drawable.ic_cloud_upload), if(sheet.isUploaded) "同步" else "上传", Color(0xFF9C27B0), false) { onUpload(sheet) }
+                ActionButton(
+                    painterResource(R.drawable.ic_cloud_upload),
+                    if(sheet.isUploaded) "同步" else "上传",
+                    Color(0xFF9C27B0),
+                    false
+                ) { onUpload(sheet) }
                 ActionButton(painterResource(R.drawable.ic_edit), "编辑", Color(0xFF2196F3), false) { onEdit(sheet.id) }
                 ActionButton(painterResource(R.drawable.ic_play), "练习", Color(0xFF4CAF50), true) { onPractice(sheet.id) }
-                IconButton(onClick = { onDelete(sheet) }) { Icon(painterResource(R.drawable.ic_delete), null, tint = Color.Red) }
+                IconButton(onClick = { onDelete(sheet) }) {
+                    Icon(painterResource(R.drawable.ic_delete), null, tint = Color.Red)
+                }
             }
         }
     }
 }
 
 @Composable
-fun ActionButton(icon: androidx.compose.ui.graphics.painter.Painter, label: String, color: Color, isPrimary: Boolean, onClick: () -> Unit) {
+fun ActionButton(
+    icon: androidx.compose.ui.graphics.painter.Painter,
+    label: String,
+    color: Color,
+    isPrimary: Boolean,
+    onClick: () -> Unit
+) {
     Button(
         onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = if(isPrimary) color else color.copy(alpha = 0.1f), contentColor = if(isPrimary) Color.White else color),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if(isPrimary) color else color.copy(alpha = 0.1f),
+            contentColor = if(isPrimary) Color.White else color
+        ),
         contentPadding = PaddingValues(horizontal = 12.dp),
         modifier = Modifier.height(36.dp)
     ) {
@@ -421,21 +486,10 @@ fun ActionButton(icon: androidx.compose.ui.graphics.painter.Painter, label: Stri
 @Composable
 fun EmptyStateDisplay(padding: PaddingValues, isSearching: Boolean) {
     Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-        Text(if (isSearching) "未找到匹配简谱" else "书架空空如也\n去广场看看或自己创作吧", textAlign = TextAlign.Center, color = Color.Gray)
+        Text(
+            if (isSearching) "未找到匹配简谱" else "书架空空如也\n去广场看看或自己创作吧",
+            textAlign = TextAlign.Center,
+            color = Color.Gray
+        )
     }
-}
-
-private fun provideKalimbaApi(): KalimbaApiService {
-    val logging = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BODY }
-    val client = OkHttpClient.Builder()
-        .addInterceptor(logging)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .build()
-
-    return Retrofit.Builder()
-        .baseUrl("https://guangji.online/")
-        .client(client)
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-        .create(KalimbaApiService::class.java)
 }
